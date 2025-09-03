@@ -1,0 +1,63 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  carts     AbandonedCart[]
+}
+
+model AbandonedCart {
+  id              String        @id @default(cuid())
+  customerId      String
+  customer        Customer      @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  cartValue       Float
+  currency        String        @default("USD")
+  items           CartItem[]
+  status          CartStatus    @default(ABANDONED)
+  abandonedAt     DateTime      @default(now())
+  recoveredAt     DateTime?
+  paymentLinkId   String?
+  paymentLinkUrl  String?
+  stripeSessionId String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+  @@index([abandonedAt])
+}
+
+model CartItem {
+  id              String        @id @default(cuid())
+  abandonedCartId String
+  abandonedCart   AbandonedCart @relation(fields: [abandonedCartId], references: [id], onDelete: Cascade)
+  productName     String
+  productId       String?
+  quantity        Int
+  unitPrice       Float
+  imageUrl        String?
+  createdAt       DateTime      @default(now())
+
+  @@index([abandonedCartId])
+}
+
+enum CartStatus {
+  ABANDONED
+  LINK_SENT
+  RECOVERED
+  EXPIRED
+}
