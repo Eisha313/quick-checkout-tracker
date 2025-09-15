@@ -1,81 +1,86 @@
 import { NextResponse } from 'next/server';
+import { handleError, isAppError } from './errors';
 
-export type ApiResponse<T = unknown> = {
+export interface ApiResponse<T = unknown> {
   success: boolean;
   data?: T;
-  error?: string;
-  message?: string;
-};
+  error?: {
+    message: string;
+    code: string;
+  };
+  meta?: {
+    page?: number;
+    limit?: number;
+    total?: number;
+    totalPages?: number;
+  };
+}
 
 export function successResponse<T>(
   data: T,
-  message?: string,
-  status: number = 200
+  status: number = 200,
+  meta?: ApiResponse['meta']
 ): NextResponse<ApiResponse<T>> {
-  return NextResponse.json(
-    {
-      success: true,
-      data,
-      message,
-    },
-    { status }
-  );
+  const response: ApiResponse<T> = {
+    success: true,
+    data,
+  };
+
+  if (meta) {
+    response.meta = meta;
+  }
+
+  return NextResponse.json(response, { status });
 }
 
 export function errorResponse(
-  error: string,
-  status: number = 400
+  error: unknown,
+  defaultStatus: number = 500
 ): NextResponse<ApiResponse> {
+  const { message, statusCode, code } = handleError(error);
+
   return NextResponse.json(
     {
       success: false,
-      error,
+      error: {
+        message,
+        code,
+      },
     },
-    { status }
+    { status: statusCode || defaultStatus }
   );
 }
 
-export function notFoundResponse(
-  resource: string = 'Resource'
-): NextResponse<ApiResponse> {
-  return NextResponse.json(
-    {
-      success: false,
-      error: `${resource} not found`,
-    },
-    { status: 404 }
-  );
+export function paginatedResponse<T>(
+  data: T[],
+  page: number,
+  limit: number,
+  total: number
+): NextResponse<ApiResponse<T[]>> {
+  const totalPages = Math.ceil(total / limit);
+
+  return successResponse(data, 200, {
+    page,
+    limit,
+    total,
+    totalPages,
+  });
 }
 
-export function serverErrorResponse(
-  error?: Error | string
-): NextResponse<ApiResponse> {
-  const message =
-    error instanceof Error ? error.message : error || 'Internal server error';
-
-  // Log the error in development
-  if (process.env.NODE_ENV === 'development') {
-    console.error('Server error:', message);
-  }
-
-  return NextResponse.json(
-    {
-      success: false,
-      error: 'Internal server error',
-    },
-    { status: 500 }
-  );
+export function createdResponse<T>(data: T): NextResponse<ApiResponse<T>> {
+  return successResponse(data, 201);
 }
 
-export function validationErrorResponse(
-  errors: Record<string, string[]>
-): NextResponse<ApiResponse> {
-  return NextResponse.json(
-    {
-      success: false,
-      error: 'Validation failed',
-      data: errors,
-    },
-    { status: 422 }
-  );
+export function noContentResponse(): NextResponse {
+  return new NextResponse(null, { status: 204 });
+}
+
+// Helper to wrap async route handlers with error handling
+export function withErrorHandling<T>(
+  handler: () => Promise<NextResponse<ApiResponse<T>>>
+): Promise<NextResponse<ApiResponse<T>>> {
+  return handler().catch((error) => {
+    console.error('API route error:', error);
+    return errorResponse(error) as NextResponse<ApiResponse<T>>;
+  });
 }
