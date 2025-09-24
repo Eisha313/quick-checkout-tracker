@@ -1,18 +1,22 @@
-import { AbandonedCart, CartStatus, PaymentLink } from '@/types';
+/**
+ * Analytics utility functions for recovery tracking
+ */
+
+import { CartStatus } from './constants';
+import { calculateCartTotal, Cart } from './cart-utils';
+import { getDateRange, daysBetween } from './date-utils';
 
 export interface AnalyticsSummary {
-  totalCarts: number;
-  abandonedCarts: number;
-  recoveredCarts: number;
-  pendingCarts: number;
+  totalAbandonedCarts: number;
+  totalRecoveredCarts: number;
   recoveryRate: number;
   totalAbandonedValue: number;
   totalRecoveredValue: number;
   averageCartValue: number;
-  potentialRecoveryValue: number;
+  periodDays: number;
 }
 
-export interface DailyAnalytics {
+export interface DailyStats {
   date: string;
   abandoned: number;
   recovered: number;
@@ -20,145 +24,131 @@ export interface DailyAnalytics {
   recoveredValue: number;
 }
 
-export interface TimeRange {
-  start: Date;
-  end: Date;
-}
-
-export function calculateAnalyticsSummary(carts: AbandonedCart[]): AnalyticsSummary {
-  const totalCarts = carts.length;
-  const abandonedCarts = carts.filter(c => c.status === 'abandoned').length;
-  const recoveredCarts = carts.filter(c => c.status === 'recovered').length;
-  const pendingCarts = carts.filter(c => c.status === 'pending').length;
-
-  const recoveryRate = totalCarts > 0 
-    ? Math.round((recoveredCarts / totalCarts) * 100 * 100) / 100
-    : 0;
-
-  const totalAbandonedValue = carts
-    .filter(c => c.status === 'abandoned')
-    .reduce((sum, c) => sum + c.cartValue, 0);
-
-  const totalRecoveredValue = carts
-    .filter(c => c.status === 'recovered')
-    .reduce((sum, c) => sum + c.cartValue, 0);
-
-  const averageCartValue = totalCarts > 0
-    ? Math.round((carts.reduce((sum, c) => sum + c.cartValue, 0) / totalCarts) * 100) / 100
-    : 0;
-
-  const potentialRecoveryValue = carts
-    .filter(c => c.status === 'abandoned' || c.status === 'pending')
-    .reduce((sum, c) => sum + c.cartValue, 0);
-
-  return {
-    totalCarts,
-    abandonedCarts,
-    recoveredCarts,
-    pendingCarts,
-    recoveryRate,
-    totalAbandonedValue,
-    totalRecoveredValue,
-    averageCartValue,
-    potentialRecoveryValue,
-  };
-}
-
-export function calculateDailyAnalytics(
-  carts: AbandonedCart[],
-  range: TimeRange
-): DailyAnalytics[] {
-  const dailyMap = new Map<string, DailyAnalytics>();
+export function calculateRecoveryRate(recovered: number, total: number): number {
+  if (typeof recovered !== 'number' || typeof total !== 'number') {
+    return 0;
+  }
   
-  // Initialize all days in range
-  const current = new Date(range.start);
-  while (current <= range.end) {
-    const dateKey = current.toISOString().split('T')[0];
-    dailyMap.set(dateKey, {
-      date: dateKey,
-      abandoned: 0,
-      recovered: 0,
-      abandonedValue: 0,
-      recoveredValue: 0,
-    });
-    current.setDate(current.getDate() + 1);
+  if (total <= 0 || recovered < 0) {
+    return 0;
+  }
+  
+  // Ensure recovered doesn't exceed total
+  const safeRecovered = Math.min(recovered, total);
+  return Math.round((safeRecovered / total) * 100 * 100) / 100;
+}
+
+export function calculateAnalyticsSummary(
+  carts: Cart[],
+  period: 'today' | 'week' | 'month' | 'year' = 'week'
+): AnalyticsSummary {
+  if (!Array.isArray(carts)) {
+    return {
+      totalAbandonedCarts: 0,
+      totalRecoveredCarts: 0,
+      recoveryRate: 0,
+      totalAbandonedValue: 0,
+      totalRecoveredValue: 0,
+      averageCartValue: 0,
+      periodDays: 0,
+    };
   }
 
-  // Aggregate cart data
-  for (const cart of carts) {
-    const dateKey = new Date(cart.createdAt).toISOString().split('T')[0];
-    const daily = dailyMap.get(dateKey);
-    
-    if (daily) {
-      if (cart.status === 'abandoned') {
-        daily.abandoned += 1;
-        daily.abandonedValue += cart.cartValue;
-      } else if (cart.status === 'recovered') {
-        daily.recovered += 1;
-        daily.recoveredValue += cart.cartValue;
-      }
-    }
-  }
+  const { start, end } = getDateRange(period);
+  
+  const filteredCarts = carts.filter(cart => {
+    if (!cart.createdAt) return false;
+    const cartDate = new Date(cart.createdAt);
+    return !isNaN(cartDate.getTime()) && cartDate >= start && cartDate <= end;
+  });
 
-  return Array.from(dailyMap.values()).sort(
-    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+  const abandonedCarts = filteredCarts.filter(
+    cart => cart.status === CartStatus.ABANDONED || cart.status === CartStatus.RECOVERED
   );
-}
+  
+  const recoveredCarts = filteredCarts.filter(
+    cart => cart.status === CartStatus.RECOVERED
+  );
 
-export function getTimeRange(period: 'week' | 'month' | 'quarter'): TimeRange {
-  const end = new Date();
-  const start = new Date();
+  const totalAbandonedValue = abandonedCarts.reduce(
+    (sum, cart) => sum + calculateCartTotal(cart.items ?? []),
+    0
+  );
 
-  switch (period) {
-    case 'week':
-      start.setDate(end.getDate() - 7);
-      break;
-    case 'month':
-      start.setDate(end.getDate() - 30);
-      break;
-    case 'quarter':
-      start.setDate(end.getDate() - 90);
-      break;
-  }
+  const totalRecoveredValue = recoveredCarts.reduce(
+    (sum, cart) => sum + calculateCartTotal(cart.items ?? []),
+    0
+  );
 
-  start.setHours(0, 0, 0, 0);
-  end.setHours(23, 59, 59, 999);
-
-  return { start, end };
-}
-
-export function calculateRecoveryTrend(
-  currentPeriod: DailyAnalytics[],
-  previousPeriod: DailyAnalytics[]
-): { trend: 'up' | 'down' | 'stable'; percentage: number } {
-  const currentRecovered = currentPeriod.reduce((sum, d) => sum + d.recovered, 0);
-  const currentTotal = currentPeriod.reduce((sum, d) => sum + d.abandoned + d.recovered, 0);
-  const currentRate = currentTotal > 0 ? currentRecovered / currentTotal : 0;
-
-  const previousRecovered = previousPeriod.reduce((sum, d) => sum + d.recovered, 0);
-  const previousTotal = previousPeriod.reduce((sum, d) => sum + d.abandoned + d.recovered, 0);
-  const previousRate = previousTotal > 0 ? previousRecovered / previousTotal : 0;
-
-  const difference = currentRate - previousRate;
-  const percentage = Math.abs(Math.round(difference * 100 * 100) / 100);
-
-  if (Math.abs(difference) < 0.01) {
-    return { trend: 'stable', percentage: 0 };
-  }
+  const totalCarts = abandonedCarts.length;
+  const averageCartValue = totalCarts > 0 ? totalAbandonedValue / totalCarts : 0;
 
   return {
-    trend: difference > 0 ? 'up' : 'down',
-    percentage,
+    totalAbandonedCarts: abandonedCarts.length,
+    totalRecoveredCarts: recoveredCarts.length,
+    recoveryRate: calculateRecoveryRate(recoveredCarts.length, abandonedCarts.length),
+    totalAbandonedValue: Math.round(totalAbandonedValue * 100) / 100,
+    totalRecoveredValue: Math.round(totalRecoveredValue * 100) / 100,
+    averageCartValue: Math.round(averageCartValue * 100) / 100,
+    periodDays: daysBetween(start, end),
   };
 }
 
-export function formatCurrency(amount: number): string {
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-  }).format(amount / 100);
+export function generateDailyStats(carts: Cart[], days: number = 7): DailyStats[] {
+  if (!Array.isArray(carts) || typeof days !== 'number' || days <= 0) {
+    return [];
+  }
+  
+  const stats: DailyStats[] = [];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  for (let i = days - 1; i >= 0; i--) {
+    const date = new Date(today);
+    date.setDate(date.getDate() - i);
+    const dateStr = date.toISOString().split('T')[0];
+
+    const dayCarts = carts.filter(cart => {
+      if (!cart.createdAt) return false;
+      const cartDate = new Date(cart.createdAt);
+      if (isNaN(cartDate.getTime())) return false;
+      return cartDate.toISOString().split('T')[0] === dateStr;
+    });
+
+    const abandoned = dayCarts.filter(
+      cart => cart.status === CartStatus.ABANDONED || cart.status === CartStatus.RECOVERED
+    );
+    const recovered = dayCarts.filter(cart => cart.status === CartStatus.RECOVERED);
+
+    stats.push({
+      date: dateStr,
+      abandoned: abandoned.length,
+      recovered: recovered.length,
+      abandonedValue: Math.round(
+        abandoned.reduce((sum, cart) => sum + calculateCartTotal(cart.items ?? []), 0) * 100
+      ) / 100,
+      recoveredValue: Math.round(
+        recovered.reduce((sum, cart) => sum + calculateCartTotal(cart.items ?? []), 0) * 100
+      ) / 100,
+    });
+  }
+
+  return stats;
 }
 
 export function formatPercentage(value: number): string {
-  return `${value.toFixed(1)}%`;
+  if (typeof value !== 'number' || isNaN(value)) {
+    return '0%';
+  }
+  return `${Math.max(0, Math.min(100, value)).toFixed(1)}%`;
+}
+
+export function formatCurrency(amount: number): string {
+  if (typeof amount !== 'number' || isNaN(amount)) {
+    return '$0.00';
+  }
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+  }).format(Math.max(0, amount));
 }

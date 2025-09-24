@@ -1,111 +1,112 @@
-import type { CartItem, CartStatus, RecoveryStats } from '@/types';
-
 /**
- * Calculate total value of cart items
+ * Cart utility functions
  */
-export function calculateCartTotal(items: CartItem[]): number {
-  return items.reduce((total, item) => total + item.price * item.quantity, 0);
+
+import { CartStatus, CART_ABANDONMENT_THRESHOLD_HOURS, RECOVERY_LINK_EXPIRY_HOURS } from './constants';
+import { isWithinHours, parseDate } from './date-utils';
+
+export interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+  imageUrl?: string;
 }
 
-/**
- * Format currency value for display
- */
-export function formatCurrency(amount: number, currency = 'USD'): string {
+export interface Cart {
+  id: string;
+  customerId: string;
+  customerEmail: string;
+  customerName?: string;
+  items: CartItem[];
+  status: CartStatus;
+  createdAt: Date;
+  updatedAt: Date;
+  recoveryLinkId?: string;
+  recoveryLinkCreatedAt?: Date;
+}
+
+export function calculateCartTotal(items: CartItem[]): number {
+  if (!Array.isArray(items) || items.length === 0) {
+    return 0;
+  }
+  
+  return items.reduce((total, item) => {
+    const price = typeof item.price === 'number' && !isNaN(item.price) ? item.price : 0;
+    const quantity = typeof item.quantity === 'number' && !isNaN(item.quantity) ? item.quantity : 0;
+    return total + (price * Math.max(0, quantity));
+  }, 0);
+}
+
+export function formatCartTotal(amount: number): string {
+  if (typeof amount !== 'number' || isNaN(amount)) {
+    return '$0.00';
+  }
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
-    currency,
-  }).format(amount / 100); // Assuming amounts are stored in cents
+    currency: 'USD',
+  }).format(Math.max(0, amount));
 }
 
-/**
- * Calculate time since cart was abandoned
- */
-export function getAbandonmentAge(abandonedAt: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - abandonedAt.getTime();
-  const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-  const diffDays = Math.floor(diffHours / 24);
-
-  if (diffDays > 0) {
-    return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`;
-  }
-  if (diffHours > 0) {
-    return `${diffHours} hour${diffHours === 1 ? '' : 's'} ago`;
-  }
-  const diffMinutes = Math.floor(diffMs / (1000 * 60));
-  return `${diffMinutes} minute${diffMinutes === 1 ? '' : 's'} ago`;
-}
-
-/**
- * Check if cart is eligible for recovery (not expired, not already recovered)
- */
-export function isRecoverable(status: CartStatus, abandonedAt: Date, maxAgeDays = 30): boolean {
-  if (status === 'RECOVERED' || status === 'EXPIRED') {
+export function isCartAbandoned(cart: Cart): boolean {
+  if (cart.status !== CartStatus.ACTIVE) {
     return false;
   }
-
-  const now = new Date();
-  const diffMs = now.getTime() - abandonedAt.getTime();
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
-
-  return diffDays <= maxAgeDays;
-}
-
-/**
- * Calculate recovery statistics
- */
-export function calculateRecoveryStats(
-  totalCarts: number,
-  recoveredCarts: number,
-  totalValue: number,
-  recoveredValue: number
-): RecoveryStats {
-  return {
-    totalCarts,
-    recoveredCarts,
-    recoveryRate: totalCarts > 0 ? (recoveredCarts / totalCarts) * 100 : 0,
-    totalValue,
-    recoveredValue,
-    averageCartValue: totalCarts > 0 ? totalValue / totalCarts : 0,
-  };
-}
-
-/**
- * Get status badge color for UI
- */
-export function getStatusColor(status: CartStatus): string {
-  const colors: Record<CartStatus, string> = {
-    ABANDONED: 'bg-yellow-100 text-yellow-800',
-    RECOVERED: 'bg-green-100 text-green-800',
-    EXPIRED: 'bg-gray-100 text-gray-800',
-    LINK_SENT: 'bg-blue-100 text-blue-800',
-  };
-  return colors[status] || 'bg-gray-100 text-gray-800';
-}
-
-/**
- * Validate cart items structure
- */
-export function validateCartItems(items: unknown): items is CartItem[] {
-  if (!Array.isArray(items)) return false;
   
-  return items.every(
-    (item) =>
-      typeof item === 'object' &&
-      item !== null &&
-      typeof item.id === 'string' &&
-      typeof item.name === 'string' &&
-      typeof item.price === 'number' &&
-      typeof item.quantity === 'number' &&
-      item.price >= 0 &&
-      item.quantity > 0
-  );
+  const updatedAt = cart.updatedAt instanceof Date ? cart.updatedAt : parseDate(cart.updatedAt as unknown as string);
+  if (!updatedAt) {
+    return false;
+  }
+  
+  return !isWithinHours(updatedAt, CART_ABANDONMENT_THRESHOLD_HOURS);
 }
 
-/**
- * Truncate text with ellipsis
- */
-export function truncateText(text: string, maxLength: number): string {
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, maxLength - 3)}...`;
+export function isRecoveryLinkValid(cart: Cart): boolean {
+  if (!cart.recoveryLinkId || !cart.recoveryLinkCreatedAt) {
+    return false;
+  }
+  
+  const linkCreatedAt = cart.recoveryLinkCreatedAt instanceof Date 
+    ? cart.recoveryLinkCreatedAt 
+    : parseDate(cart.recoveryLinkCreatedAt as unknown as string);
+    
+  if (!linkCreatedAt) {
+    return false;
+  }
+  
+  return isWithinHours(linkCreatedAt, RECOVERY_LINK_EXPIRY_HOURS);
+}
+
+export function getCartSummary(cart: Cart): string {
+  const itemCount = cart.items?.length ?? 0;
+  const total = calculateCartTotal(cart.items ?? []);
+  return `${itemCount} item${itemCount === 1 ? '' : 's'} - ${formatCartTotal(total)}`;
+}
+
+export function sortCartsByValue(carts: Cart[], order: 'asc' | 'desc' = 'desc'): Cart[] {
+  if (!Array.isArray(carts)) {
+    return [];
+  }
+  
+  return [...carts].sort((a, b) => {
+    const totalA = calculateCartTotal(a.items ?? []);
+    const totalB = calculateCartTotal(b.items ?? []);
+    return order === 'desc' ? totalB - totalA : totalA - totalB;
+  });
+}
+
+export function filterAbandonedCarts(carts: Cart[]): Cart[] {
+  if (!Array.isArray(carts)) {
+    return [];
+  }
+  
+  return carts.filter(isCartAbandoned);
+}
+
+export function getHighValueCarts(carts: Cart[], threshold: number = 100): Cart[] {
+  if (!Array.isArray(carts) || typeof threshold !== 'number') {
+    return [];
+  }
+  
+  return carts.filter(cart => calculateCartTotal(cart.items ?? []) >= threshold);
 }
