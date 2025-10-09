@@ -1,27 +1,28 @@
 export class AppError extends Error {
-  public readonly statusCode: number;
-  public readonly isOperational: boolean;
-  public readonly code: string;
+  public statusCode: number;
+  public isOperational: boolean;
+  public code?: string;
+  public details?: Record<string, unknown>;
 
   constructor(
     message: string,
     statusCode: number = 500,
-    code: string = 'INTERNAL_ERROR',
-    isOperational: boolean = true
+    code?: string,
+    details?: Record<string, unknown>
   ) {
     super(message);
     this.statusCode = statusCode;
+    this.isOperational = true;
     this.code = code;
-    this.isOperational = isOperational;
+    this.details = details;
 
-    Object.setPrototypeOf(this, AppError.prototype);
     Error.captureStackTrace(this, this.constructor);
   }
 }
 
 export class ValidationError extends AppError {
-  constructor(message: string) {
-    super(message, 400, 'VALIDATION_ERROR');
+  constructor(message: string, details?: Record<string, unknown>) {
+    super(message, 400, 'VALIDATION_ERROR', details);
   }
 }
 
@@ -37,15 +38,30 @@ export class UnauthorizedError extends AppError {
   }
 }
 
-export class StripeError extends AppError {
-  constructor(message: string) {
-    super(message, 502, 'STRIPE_ERROR');
+export class ForbiddenError extends AppError {
+  constructor(message: string = 'Forbidden') {
+    super(message, 403, 'FORBIDDEN');
   }
 }
 
-export class DatabaseError extends AppError {
-  constructor(message: string = 'Database operation failed') {
-    super(message, 500, 'DATABASE_ERROR');
+export class ConflictError extends AppError {
+  constructor(message: string = 'Resource conflict') {
+    super(message, 409, 'CONFLICT');
+  }
+}
+
+export class ExternalServiceError extends AppError {
+  public service: string;
+
+  constructor(service: string, message: string = 'External service error') {
+    super(`${service}: ${message}`, 502, 'EXTERNAL_SERVICE_ERROR');
+    this.service = service;
+  }
+}
+
+export class RateLimitError extends AppError {
+  constructor(message: string = 'Too many requests') {
+    super(message, 429, 'RATE_LIMIT_EXCEEDED');
   }
 }
 
@@ -53,34 +69,38 @@ export function isAppError(error: unknown): error is AppError {
   return error instanceof AppError;
 }
 
-export function handleError(error: unknown): {
-  message: string;
-  statusCode: number;
-  code: string;
-} {
+export function normalizeError(error: unknown): AppError {
   if (isAppError(error)) {
-    return {
-      message: error.message,
-      statusCode: error.statusCode,
-      code: error.code,
-    };
+    return error;
   }
 
   if (error instanceof Error) {
-    console.error('Unhandled error:', error);
-    return {
-      message: process.env.NODE_ENV === 'production'
-        ? 'An unexpected error occurred'
-        : error.message,
-      statusCode: 500,
-      code: 'INTERNAL_ERROR',
-    };
+    return new AppError(error.message, 500, 'INTERNAL_ERROR');
   }
 
-  console.error('Unknown error:', error);
-  return {
-    message: 'An unexpected error occurred',
-    statusCode: 500,
-    code: 'UNKNOWN_ERROR',
-  };
+  if (typeof error === 'string') {
+    return new AppError(error, 500, 'INTERNAL_ERROR');
+  }
+
+  return new AppError('An unexpected error occurred', 500, 'UNKNOWN_ERROR');
+}
+
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  
+  if (typeof error === 'string') {
+    return error;
+  }
+  
+  return 'An unexpected error occurred';
+}
+
+export function safeStringify(obj: unknown): string {
+  try {
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return String(obj);
+  }
 }
