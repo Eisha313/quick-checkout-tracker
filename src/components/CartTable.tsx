@@ -1,158 +1,195 @@
 'use client';
 
-import React from 'react';
-import { Table } from './ui/Table';
-import { formatCurrency, formatRelativeTime } from '@/lib/date-utils';
-import { getCartStatusColor, getCartStatusLabel } from '@/lib/cart-utils';
+import React, { useState, useMemo } from 'react';
+import { Table, TableHeader, TableBody, TableRow, TableCell, TableHeaderCell } from './ui/Table';
 import { AbandonedCart, CartStatus } from '@/types';
+import { formatCurrency, formatRelativeDate } from '@/lib/date-utils';
 import { usePaymentLink } from '@/hooks';
+import { CART_STATUS_LABELS, CART_STATUS_COLORS } from '@/lib/constants';
 
 interface CartTableProps {
   carts: AbandonedCart[];
+  onCartRecovered?: (cartId: string) => void;
   isLoading?: boolean;
-  onCartSelect?: (cart: AbandonedCart) => void;
 }
 
-function StatusBadge({ status }: { status: CartStatus }) {
-  const colorClass = getCartStatusColor(status);
-  const label = getCartStatusLabel(status);
+type SortField = 'createdAt' | 'cartValue' | 'status' | 'customerEmail';
+type SortDirection = 'asc' | 'desc';
 
-  return (
-    <span
-      className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${colorClass}`}
-    >
-      {label}
-    </span>
-  );
-}
+export function CartTable({ carts, onCartRecovered, isLoading = false }: CartTableProps) {
+  const [sortField, setSortField] = useState<SortField>('createdAt');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
+  const { generateLink, isGenerating, generatingCartId } = usePaymentLink();
 
-function PaymentLinkButton({ cart }: { cart: AbandonedCart }) {
-  const { generateLink, isGenerating } = usePaymentLink();
-
-  const handleClick = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    await generateLink(cart.id);
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('desc');
+    }
   };
 
-  if (cart.status === 'recovered') {
+  const sortedCarts = useMemo(() => {
+    return [...carts].sort((a, b) => {
+      let comparison = 0;
+      
+      switch (sortField) {
+        case 'createdAt':
+          comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+          break;
+        case 'cartValue':
+          comparison = a.cartValue - b.cartValue;
+          break;
+        case 'status':
+          comparison = a.status.localeCompare(b.status);
+          break;
+        case 'customerEmail':
+          comparison = a.customerEmail.localeCompare(b.customerEmail);
+          break;
+      }
+      
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+  }, [carts, sortField, sortDirection]);
+
+  const handleGenerateLink = async (cartId: string) => {
+    const paymentUrl = await generateLink(cartId);
+    if (paymentUrl) {
+      window.open(paymentUrl, '_blank');
+    }
+  };
+
+  const getSortIndicator = (field: SortField) => {
+    if (sortField !== field) return null;
     return (
-      <span className="text-green-600 text-sm font-medium">
-        Recovered
+      <span className="ml-1 text-gray-400">
+        {sortDirection === 'asc' ? '↑' : '↓'}
       </span>
     );
+  };
+
+  const SortableHeader = ({ field, children }: { field: SortField; children: React.ReactNode }) => (
+    <TableHeaderCell 
+      className="cursor-pointer hover:bg-gray-100 select-none transition-colors"
+      onClick={() => handleSort(field)}
+    >
+      <div className="flex items-center">
+        {children}
+        {getSortIndicator(field)}
+      </div>
+    </TableHeaderCell>
+  );
+
+  if (isLoading) {
+    return (
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-12">
+        <div className="flex flex-col items-center justify-center text-gray-500">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-4"></div>
+          <p className="text-sm">Loading abandoned carts...</p>
+        </div>
+      </div>
+    );
   }
 
-  if (cart.paymentLink) {
+  if (carts.length === 0) {
     return (
-      <a
-        href={cart.paymentLink}
-        target="_blank"
-        rel="noopener noreferrer"
-        onClick={(e) => e.stopPropagation()}
-        className="text-indigo-600 hover:text-indigo-800 text-sm font-medium underline"
-      >
-        View Link
-      </a>
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-12">
+        <div className="flex flex-col items-center justify-center text-gray-500">
+          <svg 
+            className="w-16 h-16 mb-4 text-gray-300" 
+            fill="none" 
+            stroke="currentColor" 
+            viewBox="0 0 24 24"
+          >
+            <path 
+              strokeLinecap="round" 
+              strokeLinejoin="round" 
+              strokeWidth={1.5} 
+              d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" 
+            />
+          </svg>
+          <h3 className="text-lg font-medium text-gray-900 mb-1">No abandoned carts</h3>
+          <p className="text-sm">Great news! There are no abandoned carts to recover.</p>
+        </div>
+      </div>
     );
   }
 
   return (
-    <button
-      onClick={handleClick}
-      disabled={isGenerating}
-      className="inline-flex items-center px-3 py-1 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-    >
-      {isGenerating ? (
-        <>
-          <svg
-            className="animate-spin -ml-1 mr-2 h-4 w-4 text-white"
-            fill="none"
-            viewBox="0 0 24 24"
-          >
-            <circle
-              className="opacity-25"
-              cx="12"
-              cy="12"
-              r="10"
-              stroke="currentColor"
-              strokeWidth="4"
-            />
-            <path
-              className="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-            />
-          </svg>
-          Generating...
-        </>
-      ) : (
-        'Generate Link'
-      )}
-    </button>
-  );
-}
-
-export function CartTable({ carts, isLoading, onCartSelect }: CartTableProps) {
-  const columns = [
-    {
-      key: 'customer',
-      header: 'Customer',
-      render: (cart: AbandonedCart) => (
-        <div>
-          <div className="font-medium text-gray-900">
-            {cart.customerName || 'Unknown'}
-          </div>
-          <div className="text-gray-500">{cart.customerEmail}</div>
-        </div>
-      ),
-    },
-    {
-      key: 'items',
-      header: 'Items',
-      render: (cart: AbandonedCart) => (
-        <span className="text-gray-900">
-          {cart.items.length} item{cart.items.length !== 1 ? 's' : ''}
-        </span>
-      ),
-    },
-    {
-      key: 'total',
-      header: 'Cart Value',
-      render: (cart: AbandonedCart) => (
-        <span className="font-medium text-gray-900">
-          {formatCurrency(cart.totalAmount, cart.currency)}
-        </span>
-      ),
-    },
-    {
-      key: 'status',
-      header: 'Status',
-      render: (cart: AbandonedCart) => <StatusBadge status={cart.status} />,
-    },
-    {
-      key: 'abandonedAt',
-      header: 'Abandoned',
-      render: (cart: AbandonedCart) => (
-        <span className="text-gray-500">
-          {formatRelativeTime(cart.abandonedAt)}
-        </span>
-      ),
-    },
-    {
-      key: 'actions',
-      header: 'Recovery',
-      render: (cart: AbandonedCart) => <PaymentLinkButton cart={cart} />,
-    },
-  ];
-
-  return (
-    <Table
-      columns={columns}
-      data={carts}
-      keyExtractor={(cart) => cart.id}
-      isLoading={isLoading}
-      emptyMessage="No abandoned carts found"
-      onRowClick={onCartSelect}
-    />
+    <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <SortableHeader field="customerEmail">Customer</SortableHeader>
+            <SortableHeader field="cartValue">Cart Value</SortableHeader>
+            <SortableHeader field="status">Status</SortableHeader>
+            <SortableHeader field="createdAt">Abandoned</SortableHeader>
+            <TableHeaderCell>Actions</TableHeaderCell>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {sortedCarts.map((cart) => (
+            <TableRow key={cart.id} className="hover:bg-gray-50 transition-colors">
+              <TableCell>
+                <div>
+                  <p className="font-medium text-gray-900">{cart.customerEmail}</p>
+                  {cart.customerName && (
+                    <p className="text-sm text-gray-500">{cart.customerName}</p>
+                  )}
+                </div>
+              </TableCell>
+              <TableCell>
+                <span className="font-semibold text-gray-900">
+                  {formatCurrency(cart.cartValue)}
+                </span>
+                <span className="text-sm text-gray-500 ml-1">
+                  ({cart.items.length} items)
+                </span>
+              </TableCell>
+              <TableCell>
+                <span
+                  className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${CART_STATUS_COLORS[cart.status]}`}
+                >
+                  {CART_STATUS_LABELS[cart.status]}
+                </span>
+              </TableCell>
+              <TableCell>
+                <span className="text-gray-600">
+                  {formatRelativeDate(cart.createdAt)}
+                </span>
+              </TableCell>
+              <TableCell>
+                {cart.status === 'ABANDONED' && (
+                  <button
+                    onClick={() => handleGenerateLink(cart.id)}
+                    disabled={isGenerating && generatingCartId === cart.id}
+                    className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {isGenerating && generatingCartId === cart.id ? (
+                      <>
+                        <span className="animate-spin rounded-full h-3 w-3 border-b-2 border-white mr-2"></span>
+                        Generating...
+                      </>
+                    ) : (
+                      'Send Recovery Link'
+                    )}
+                  </button>
+                )}
+                {cart.status === 'RECOVERED' && (
+                  <span className="text-green-600 text-sm font-medium">✓ Recovered</span>
+                )}
+                {cart.status === 'EXPIRED' && (
+                  <span className="text-gray-400 text-sm">Link expired</span>
+                )}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 text-sm text-gray-500">
+        Showing {sortedCarts.length} cart{sortedCarts.length !== 1 ? 's' : ''}
+      </div>
+    </div>
   );
 }
