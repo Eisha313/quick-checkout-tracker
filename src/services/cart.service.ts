@@ -1,218 +1,194 @@
-import prisma from '@/lib/prisma';
-import { CartWithItems, CartStatus, CreateCartInput, UpdateCartInput } from '@/types';
-import { calculateCartTotal } from '@/lib/cart-utils';
-import { AppError } from '@/lib/errors';
+import { prisma } from '@/lib/prisma';
+import { CartStatus, CartWithItems, CreateCartInput, UpdateCartInput } from '@/types';
+import { NotFoundError, ValidationError } from '@/lib/errors';
+import { isValidEmail, isValidCartStatus } from '@/lib/validation';
 
 export class CartService {
-  static async getAllCarts(status?: CartStatus): Promise<CartWithItems[]> {
-    try {
-      const where = status ? { status } : {};
-      
-      const carts = await prisma.cart.findMany({
-        where,
-        include: {
-          items: true,
-        },
-        orderBy: {
-          abandonedAt: 'desc',
-        },
-      });
+  static async findAll(options?: {
+    status?: CartStatus;
+    limit?: number;
+    offset?: number;
+  }): Promise<CartWithItems[]> {
+    const { status, limit = 50, offset = 0 } = options || {};
 
-      return carts.map(cart => ({
-        ...cart,
-        customerName: cart.customerName ?? undefined,
-        customerEmail: cart.customerEmail ?? 'unknown@example.com',
-        items: cart.items ?? [],
-      })) as CartWithItems[];
-    } catch (error) {
-      console.error('Error fetching carts:', error);
-      throw new AppError('Failed to fetch carts', 500);
-    }
+    const where = status ? { status } : {};
+
+    const carts = await prisma.cart.findMany({
+      where,
+      include: {
+        items: true,
+      },
+      orderBy: {
+        abandonedAt: 'desc',
+      },
+      take: limit,
+      skip: offset,
+    });
+
+    return carts as CartWithItems[];
   }
 
-  static async getCartById(id: string): Promise<CartWithItems | null> {
-    if (!id) {
-      throw new AppError('Cart ID is required', 400);
+  static async findById(id: string): Promise<CartWithItems> {
+    if (!id || typeof id !== 'string') {
+      throw new ValidationError('Invalid cart ID');
     }
 
-    try {
-      const cart = await prisma.cart.findUnique({
-        where: { id },
-        include: {
-          items: true,
-        },
-      });
+    const cart = await prisma.cart.findUnique({
+      where: { id },
+      include: {
+        items: true,
+      },
+    });
 
-      if (!cart) {
-        return null;
-      }
-
-      return {
-        ...cart,
-        customerName: cart.customerName ?? undefined,
-        customerEmail: cart.customerEmail ?? 'unknown@example.com',
-        items: cart.items ?? [],
-      } as CartWithItems;
-    } catch (error) {
-      console.error('Error fetching cart:', error);
-      throw new AppError('Failed to fetch cart', 500);
+    if (!cart) {
+      throw new NotFoundError(`Cart with ID ${id} not found`);
     }
+
+    return cart as CartWithItems;
   }
 
-  static async createCart(data: CreateCartInput): Promise<CartWithItems> {
-    if (!data) {
-      throw new AppError('Cart data is required', 400);
-    }
+  static async findAbandoned(): Promise<CartWithItems[]> {
+    const carts = await prisma.cart.findMany({
+      where: {
+        status: 'ABANDONED',
+      },
+      include: {
+        items: true,
+      },
+      orderBy: {
+        abandonedAt: 'desc',
+      },
+    });
 
-    try {
-      const totalValue = calculateCartTotal(data.items ?? []);
-      const customerEmail = data.customerEmail?.trim() || 'unknown@example.com';
-      const customerName = data.customerName?.trim() || null;
-
-      const cart = await prisma.cart.create({
-        data: {
-          customerEmail,
-          customerName,
-          status: CartStatus.ABANDONED,
-          totalValue,
-          abandonedAt: new Date(),
-          items: {
-            create: (data.items ?? []).map((item) => ({
-              productId: item.productId || 'unknown',
-              productName: item.productName || 'Unknown Product',
-              quantity: item.quantity ?? 1,
-              price: item.price ?? 0,
-            })),
-          },
-        },
-        include: {
-          items: true,
-        },
-      });
-
-      return {
-        ...cart,
-        customerName: cart.customerName ?? undefined,
-        customerEmail: cart.customerEmail ?? 'unknown@example.com',
-        items: cart.items ?? [],
-      } as CartWithItems;
-    } catch (error) {
-      console.error('Error creating cart:', error);
-      throw new AppError('Failed to create cart', 500);
-    }
+    return carts as CartWithItems[];
   }
 
-  static async updateCart(id: string, data: UpdateCartInput): Promise<CartWithItems> {
-    if (!id) {
-      throw new AppError('Cart ID is required', 400);
+  static async create(data: CreateCartInput): Promise<CartWithItems> {
+    if (!data.customerEmail || !isValidEmail(data.customerEmail)) {
+      throw new ValidationError('Valid customer email is required');
     }
 
-    try {
-      const existingCart = await this.getCartById(id);
-      if (!existingCart) {
-        throw new AppError('Cart not found', 404);
-      }
+    if (!data.customerName || data.customerName.trim().length === 0) {
+      throw new ValidationError('Customer name is required');
+    }
 
-      const updateData: Record<string, unknown> = {};
-      
-      if (data.status !== undefined) {
-        updateData.status = data.status;
-        if (data.status === CartStatus.RECOVERED) {
-          updateData.recoveredAt = new Date();
-        }
-      }
-      
-      if (data.customerEmail !== undefined) {
-        updateData.customerEmail = data.customerEmail?.trim() || existingCart.customerEmail;
-      }
-      
-      if (data.customerName !== undefined) {
-        updateData.customerName = data.customerName?.trim() || null;
-      }
-      
-      if (data.paymentLinkId !== undefined) {
-        updateData.paymentLinkId = data.paymentLinkId;
-      }
-      
-      if (data.paymentLinkUrl !== undefined) {
-        updateData.paymentLinkUrl = data.paymentLinkUrl;
-      }
+    if (!data.items || data.items.length === 0) {
+      throw new ValidationError('Cart must have at least one item');
+    }
 
-      const cart = await prisma.cart.update({
-        where: { id },
-        data: updateData,
-        include: {
-          items: true,
+    const totalValue = data.items.reduce(
+      (sum, item) => sum + item.price * item.quantity,
+      0
+    );
+
+    const cart = await prisma.cart.create({
+      data: {
+        customerEmail: data.customerEmail.toLowerCase().trim(),
+        customerName: data.customerName.trim(),
+        totalValue,
+        currency: data.currency || 'USD',
+        status: 'ABANDONED',
+        abandonedAt: new Date(),
+        items: {
+          create: data.items.map((item) => ({
+            productId: item.productId,
+            productName: item.productName,
+            quantity: item.quantity,
+            price: item.price,
+            imageUrl: item.imageUrl,
+          })),
         },
-      });
+      },
+      include: {
+        items: true,
+      },
+    });
 
-      return {
-        ...cart,
-        customerName: cart.customerName ?? undefined,
-        customerEmail: cart.customerEmail ?? 'unknown@example.com',
-        items: cart.items ?? [],
-      } as CartWithItems;
-    } catch (error) {
-      if (error instanceof AppError) throw error;
-      console.error('Error updating cart:', error);
-      throw new AppError('Failed to update cart', 500);
-    }
+    return cart as CartWithItems;
   }
 
-  static async deleteCart(id: string): Promise<void> {
-    if (!id) {
-      throw new AppError('Cart ID is required', 400);
+  static async update(
+    id: string,
+    data: UpdateCartInput
+  ): Promise<CartWithItems> {
+    // Verify cart exists first
+    await this.findById(id);
+
+    // Validate status if provided
+    if (data.status && !isValidCartStatus(data.status)) {
+      throw new ValidationError(`Invalid cart status: ${data.status}`);
     }
 
-    try {
-      const existingCart = await this.getCartById(id);
-      if (!existingCart) {
-        throw new AppError('Cart not found', 404);
+    // Validate email if provided
+    if (data.customerEmail && !isValidEmail(data.customerEmail)) {
+      throw new ValidationError('Invalid email format');
+    }
+
+    const updateData: Record<string, unknown> = {};
+
+    if (data.status) {
+      updateData.status = data.status;
+      
+      // Set recoveredAt timestamp when status changes to RECOVERED
+      if (data.status === 'RECOVERED') {
+        updateData.recoveredAt = new Date();
       }
-
-      await prisma.cartItem.deleteMany({
-        where: { cartId: id },
-      });
-
-      await prisma.cart.delete({
-        where: { id },
-      });
-    } catch (error) {
-      if (error instanceof AppError) throw error;
-      console.error('Error deleting cart:', error);
-      throw new AppError('Failed to delete cart', 500);
     }
+
+    if (data.customerEmail) {
+      updateData.customerEmail = data.customerEmail.toLowerCase().trim();
+    }
+
+    if (data.customerName) {
+      updateData.customerName = data.customerName.trim();
+    }
+
+    if (data.paymentLinkId) {
+      updateData.paymentLinkId = data.paymentLinkId;
+    }
+
+    if (data.paymentLinkUrl) {
+      updateData.paymentLinkUrl = data.paymentLinkUrl;
+    }
+
+    const cart = await prisma.cart.update({
+      where: { id },
+      data: updateData,
+      include: {
+        items: true,
+      },
+    });
+
+    return cart as CartWithItems;
   }
 
-  static async getAbandonedCarts(): Promise<CartWithItems[]> {
-    return this.getAllCarts(CartStatus.ABANDONED);
+  static async updateStatus(
+    id: string,
+    status: CartStatus
+  ): Promise<CartWithItems> {
+    return this.update(id, { status });
   }
 
-  static async getRecoverableCarts(): Promise<CartWithItems[]> {
-    try {
-      const carts = await prisma.cart.findMany({
-        where: {
-          status: {
-            in: [CartStatus.ABANDONED, CartStatus.PENDING_RECOVERY],
-          },
-        },
-        include: {
-          items: true,
-        },
-        orderBy: {
-          totalValue: 'desc',
-        },
-      });
+  static async markAsRecovered(id: string): Promise<CartWithItems> {
+    return this.update(id, { status: 'RECOVERED' });
+  }
 
-      return carts.map(cart => ({
-        ...cart,
-        customerName: cart.customerName ?? undefined,
-        customerEmail: cart.customerEmail ?? 'unknown@example.com',
-        items: cart.items ?? [],
-      })) as CartWithItems[];
-    } catch (error) {
-      console.error('Error fetching recoverable carts:', error);
-      throw new AppError('Failed to fetch recoverable carts', 500);
-    }
+  static async delete(id: string): Promise<void> {
+    // Verify cart exists first
+    await this.findById(id);
+
+    // Delete items first due to relation
+    await prisma.cartItem.deleteMany({
+      where: { cartId: id },
+    });
+
+    await prisma.cart.delete({
+      where: { id },
+    });
+  }
+
+  static async count(status?: CartStatus): Promise<number> {
+    const where = status ? { status } : {};
+    return prisma.cart.count({ where });
   }
 }

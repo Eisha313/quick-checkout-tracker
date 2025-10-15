@@ -1,78 +1,95 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { cartService, UpdateCartParams } from '@/services/cart.service';
+import { NextRequest } from 'next/server';
+import { CartService } from '@/services/cart.service';
 import { successResponse, errorResponse } from '@/lib/api-response';
-import { CartStatus } from '@/types';
+import { NotFoundError, ValidationError } from '@/lib/errors';
+import { validateUpdateCartInput, validateId } from '@/lib/validation';
+
+interface RouteParams {
+  params: {
+    id: string;
+  };
+}
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: RouteParams
 ) {
   try {
-    const cart = await cartService.getCartById(params.id);
-    return NextResponse.json(successResponse(cart, 'Cart retrieved successfully'));
-  } catch (error: any) {
-    return NextResponse.json(
-      errorResponse(error.message || 'Failed to retrieve cart', error.statusCode || 500),
-      { status: error.statusCode || 500 }
-    );
+    const idValidation = validateId(params.id);
+    if (!idValidation.valid) {
+      return errorResponse(idValidation.errors.join(', '), 400);
+    }
+
+    const cart = await CartService.findById(params.id);
+    return successResponse(cart);
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      return errorResponse(error.message, 404);
+    }
+    if (error instanceof ValidationError) {
+      return errorResponse(error.message, 400);
+    }
+    console.error('Error fetching cart:', error);
+    return errorResponse('Failed to fetch cart', 500);
   }
 }
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: RouteParams
 ) {
   try {
-    const body = await request.json();
-    
-    const updateParams: UpdateCartParams = {};
-
-    if (body.status) {
-      const validStatuses: CartStatus[] = ['ACTIVE', 'ABANDONED', 'RECOVERED', 'CONVERTED'];
-      if (!validStatuses.includes(body.status)) {
-        return NextResponse.json(
-          errorResponse('Invalid cart status', 400),
-          { status: 400 }
-        );
-      }
-      updateParams.status = body.status;
+    const idValidation = validateId(params.id);
+    if (!idValidation.valid) {
+      return errorResponse(idValidation.errors.join(', '), 400);
     }
 
-    if (body.customerName !== undefined) {
-      updateParams.customerName = body.customerName;
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return errorResponse('Invalid JSON body', 400);
     }
 
-    if (body.items) {
-      if (!Array.isArray(body.items) || body.items.length === 0) {
-        return NextResponse.json(
-          errorResponse('Cart must have at least one item', 400),
-          { status: 400 }
-        );
-      }
-      updateParams.items = body.items;
+    const validation = validateUpdateCartInput(body);
+    if (!validation.valid) {
+      return errorResponse(validation.errors.join(', '), 400);
     }
 
-    const cart = await cartService.updateCart(params.id, updateParams);
-    return NextResponse.json(successResponse(cart, 'Cart updated successfully'));
-  } catch (error: any) {
-    return NextResponse.json(
-      errorResponse(error.message || 'Failed to update cart', error.statusCode || 500),
-      { status: error.statusCode || 500 }
-    );
+    const cart = await CartService.update(params.id, body);
+    return successResponse(cart);
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      return errorResponse(error.message, 404);
+    }
+    if (error instanceof ValidationError) {
+      return errorResponse(error.message, 400);
+    }
+    console.error('Error updating cart:', error);
+    return errorResponse('Failed to update cart', 500);
   }
 }
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: RouteParams
 ) {
   try {
-    await cartService.deleteCart(params.id);
-    return NextResponse.json(successResponse(null, 'Cart deleted successfully'));
-  } catch (error: any) {
-    return NextResponse.json(
-      errorResponse(error.message || 'Failed to delete cart', error.statusCode || 500),
-      { status: error.statusCode || 500 }
-    );
+    const idValidation = validateId(params.id);
+    if (!idValidation.valid) {
+      return errorResponse(idValidation.errors.join(', '), 400);
+    }
+
+    await CartService.delete(params.id);
+    return successResponse({ message: 'Cart deleted successfully' });
+  } catch (error) {
+    if (error instanceof NotFoundError) {
+      return errorResponse(error.message, 404);
+    }
+    if (error instanceof ValidationError) {
+      return errorResponse(error.message, 400);
+    }
+    console.error('Error deleting cart:', error);
+    return errorResponse('Failed to delete cart', 500);
   }
 }
