@@ -1,194 +1,219 @@
-import { prisma } from '@/lib/prisma';
-import { CartStatus, CartWithItems, CreateCartInput, UpdateCartInput } from '@/types';
-import { NotFoundError, ValidationError } from '@/lib/errors';
-import { isValidEmail, isValidCartStatus } from '@/lib/validation';
+import { BaseService, PaginatedResult } from './base.service';
+import { Cart, CartStatus } from '@prisma/client';
+import { CartWithItems } from '@/types';
+import { validateEmail, validateCartItems, validatePositiveNumber } from '@/lib/validation';
+import { ValidationError } from '@/lib/errors';
 
-export class CartService {
-  static async findAll(options?: {
-    status?: CartStatus;
-    limit?: number;
-    offset?: number;
-  }): Promise<CartWithItems[]> {
-    const { status, limit = 50, offset = 0 } = options || {};
+export interface CreateCartInput {
+  customerEmail: string;
+  customerName?: string;
+  items: Array<{
+    productId: string;
+    productName: string;
+    quantity: number;
+    unitPrice: number;
+  }>;
+}
 
-    const where = status ? { status } : {};
+export interface UpdateCartInput {
+  status?: CartStatus;
+  customerName?: string;
+  items?: Array<{
+    productId: string;
+    productName: string;
+    quantity: number;
+    unitPrice: number;
+  }>;
+}
 
-    const carts = await prisma.cart.findMany({
-      where,
-      include: {
-        items: true,
-      },
-      orderBy: {
-        abandonedAt: 'desc',
-      },
-      take: limit,
-      skip: offset,
-    });
+export interface CartFilters {
+  status?: CartStatus;
+  minValue?: number;
+  maxValue?: number;
+  page?: number;
+  limit?: number;
+  sortBy?: string;
+  sortOrder?: 'asc' | 'desc';
+}
 
-    return carts as CartWithItems[];
+class CartServiceImpl extends BaseService {
+  async getCarts(filters: CartFilters = {}): Promise<PaginatedResult<CartWithItems>> {
+    try {
+      const { status, minValue, maxValue, page = 1, limit = 10, sortBy, sortOrder } = filters;
+      const { skip, take } = this.buildPaginationParams(page, limit);
+      const orderBy = this.buildOrderByParams(sortBy, sortOrder);
+
+      const where: Record<string, unknown> = {};
+      
+      if (status) {
+        where.status = status;
+      }
+      
+      if (minValue !== undefined || maxValue !== undefined) {
+        where.totalValue = {};
+        if (minValue !== undefined) {
+          (where.totalValue as Record<string, number>).gte = minValue;
+        }
+        if (maxValue !== undefined) {
+          (where.totalValue as Record<string, number>).lte = maxValue;
+        }
+      }
+
+      const [carts, total] = await Promise.all([
+        this.prisma.cart.findMany({
+          where,
+          include: { items: true },
+          skip,
+          take,
+          orderBy,
+        }),
+        this.prisma.cart.count({ where }),
+      ]);
+
+      return {
+        data: carts,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      };
+    } catch (error) {
+      this.handleDatabaseError(error, 'fetch carts');
+    }
   }
 
-  static async findById(id: string): Promise<CartWithItems> {
-    if (!id || typeof id !== 'string') {
-      throw new ValidationError('Invalid cart ID');
+  async getCartById(id: string): Promise<CartWithItems> {
+    try {
+      return await this.ensureExists(
+        this.prisma.cart.findUnique({
+          where: { id },
+          include: { items: true },
+        }),
+        'Cart',
+        id
+      );
+    } catch (error) {
+      this.handleDatabaseError(error, 'fetch cart');
     }
-
-    const cart = await prisma.cart.findUnique({
-      where: { id },
-      include: {
-        items: true,
-      },
-    });
-
-    if (!cart) {
-      throw new NotFoundError(`Cart with ID ${id} not found`);
-    }
-
-    return cart as CartWithItems;
   }
 
-  static async findAbandoned(): Promise<CartWithItems[]> {
-    const carts = await prisma.cart.findMany({
-      where: {
-        status: 'ABANDONED',
-      },
-      include: {
-        items: true,
-      },
-      orderBy: {
-        abandonedAt: 'desc',
-      },
-    });
+  async createCart(input: CreateCartInput): Promise<CartWithItems> {
+    try {
+      this.validateCreateInput(input);
 
-    return carts as CartWithItems[];
+      const totalValue = input.items.reduce(
+        (sum, item) => sum + item.quantity * item.unitPrice,
+        0
+      );
+
+      const cart = await this.prisma.cart.create({
+        data: {
+          customerEmail: input.customerEmail,
+          customerName: input.customerName,
+          totalValue,
+          status: 'ABANDONED',
+          items: {
+            create: input.items.map((item) => ({
+              productId: item.productId,
+              productName: item.productName,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+            })),
+          },
+        },
+        include: { items: true },
+      });
+
+      return cart;
+    } catch (error) {
+      this.handleDatabaseError(error, 'create cart');
+    }
   }
 
-  static async create(data: CreateCartInput): Promise<CartWithItems> {
-    if (!data.customerEmail || !isValidEmail(data.customerEmail)) {
-      throw new ValidationError('Valid customer email is required');
-    }
+  async updateCart(id: string, input: UpdateCartInput): Promise<CartWithItems> {
+    try {
+      await this.getCartById(id);
+      this.validateUpdateInput(input);
 
-    if (!data.customerName || data.customerName.trim().length === 0) {
-      throw new ValidationError('Customer name is required');
-    }
+      const updateData: Record<string, unknown> = {};
 
-    if (!data.items || data.items.length === 0) {
-      throw new ValidationError('Cart must have at least one item');
-    }
+      if (input.status) {
+        updateData.status = input.status;
+      }
 
-    const totalValue = data.items.reduce(
-      (sum, item) => sum + item.price * item.quantity,
-      0
-    );
+      if (input.customerName !== undefined) {
+        updateData.customerName = input.customerName;
+      }
 
-    const cart = await prisma.cart.create({
-      data: {
-        customerEmail: data.customerEmail.toLowerCase().trim(),
-        customerName: data.customerName.trim(),
-        totalValue,
-        currency: data.currency || 'USD',
-        status: 'ABANDONED',
-        abandonedAt: new Date(),
-        items: {
-          create: data.items.map((item) => ({
+      if (input.items) {
+        const totalValue = input.items.reduce(
+          (sum, item) => sum + item.quantity * item.unitPrice,
+          0
+        );
+        updateData.totalValue = totalValue;
+
+        await this.prisma.cartItem.deleteMany({ where: { cartId: id } });
+        
+        await this.prisma.cartItem.createMany({
+          data: input.items.map((item) => ({
+            cartId: id,
             productId: item.productId,
             productName: item.productName,
             quantity: item.quantity,
-            price: item.price,
-            imageUrl: item.imageUrl,
+            unitPrice: item.unitPrice,
           })),
-        },
-      },
-      include: {
-        items: true,
-      },
-    });
-
-    return cart as CartWithItems;
-  }
-
-  static async update(
-    id: string,
-    data: UpdateCartInput
-  ): Promise<CartWithItems> {
-    // Verify cart exists first
-    await this.findById(id);
-
-    // Validate status if provided
-    if (data.status && !isValidCartStatus(data.status)) {
-      throw new ValidationError(`Invalid cart status: ${data.status}`);
-    }
-
-    // Validate email if provided
-    if (data.customerEmail && !isValidEmail(data.customerEmail)) {
-      throw new ValidationError('Invalid email format');
-    }
-
-    const updateData: Record<string, unknown> = {};
-
-    if (data.status) {
-      updateData.status = data.status;
-      
-      // Set recoveredAt timestamp when status changes to RECOVERED
-      if (data.status === 'RECOVERED') {
-        updateData.recoveredAt = new Date();
+        });
       }
+
+      const cart = await this.prisma.cart.update({
+        where: { id },
+        data: updateData,
+        include: { items: true },
+      });
+
+      return cart;
+    } catch (error) {
+      this.handleDatabaseError(error, 'update cart');
     }
-
-    if (data.customerEmail) {
-      updateData.customerEmail = data.customerEmail.toLowerCase().trim();
-    }
-
-    if (data.customerName) {
-      updateData.customerName = data.customerName.trim();
-    }
-
-    if (data.paymentLinkId) {
-      updateData.paymentLinkId = data.paymentLinkId;
-    }
-
-    if (data.paymentLinkUrl) {
-      updateData.paymentLinkUrl = data.paymentLinkUrl;
-    }
-
-    const cart = await prisma.cart.update({
-      where: { id },
-      data: updateData,
-      include: {
-        items: true,
-      },
-    });
-
-    return cart as CartWithItems;
   }
 
-  static async updateStatus(
-    id: string,
-    status: CartStatus
-  ): Promise<CartWithItems> {
-    return this.update(id, { status });
+  async deleteCart(id: string): Promise<void> {
+    try {
+      await this.getCartById(id);
+      
+      await this.prisma.cart.delete({ where: { id } });
+    } catch (error) {
+      this.handleDatabaseError(error, 'delete cart');
+    }
   }
 
-  static async markAsRecovered(id: string): Promise<CartWithItems> {
-    return this.update(id, { status: 'RECOVERED' });
+  async getAbandonedCarts(): Promise<CartWithItems[]> {
+    try {
+      return await this.prisma.cart.findMany({
+        where: { status: 'ABANDONED' },
+        include: { items: true },
+        orderBy: { createdAt: 'desc' },
+      });
+    } catch (error) {
+      this.handleDatabaseError(error, 'fetch abandoned carts');
+    }
   }
 
-  static async delete(id: string): Promise<void> {
-    // Verify cart exists first
-    await this.findById(id);
+  private validateCreateInput(input: CreateCartInput): void {
+    if (!validateEmail(input.customerEmail)) {
+      throw new ValidationError('Invalid email address');
+    }
 
-    // Delete items first due to relation
-    await prisma.cartItem.deleteMany({
-      where: { cartId: id },
-    });
-
-    await prisma.cart.delete({
-      where: { id },
-    });
+    if (!validateCartItems(input.items)) {
+      throw new ValidationError('Invalid cart items');
+    }
   }
 
-  static async count(status?: CartStatus): Promise<number> {
-    const where = status ? { status } : {};
-    return prisma.cart.count({ where });
+  private validateUpdateInput(input: UpdateCartInput): void {
+    if (input.items && !validateCartItems(input.items)) {
+      throw new ValidationError('Invalid cart items');
+    }
   }
 }
+
+export const cartService = new CartServiceImpl();
