@@ -1,27 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { cartService, GetCartsParams, CreateCartParams } from '@/services/cart.service';
-import { successResponse, errorResponse } from '@/lib/api-response';
+import { successResponse, errorResponse, paginatedResponse } from '@/lib/api-response';
+import { handleApiError } from '@/lib/api-error-handler';
+import { getCartService } from '@/services';
 import { CartStatus } from '@/types';
 
 export async function GET(request: NextRequest) {
   try {
-    const searchParams = request.nextUrl.searchParams;
-    
-    const params: GetCartsParams = {
-      page: searchParams.get('page') ? parseInt(searchParams.get('page')!) : undefined,
-      limit: searchParams.get('limit') ? parseInt(searchParams.get('limit')!) : undefined,
-      status: searchParams.get('status') as CartStatus | undefined,
-      search: searchParams.get('search') || undefined,
-      sortBy: searchParams.get('sortBy') as 'createdAt' | 'updatedAt' | 'totalValue' | undefined,
-      sortOrder: searchParams.get('sortOrder') as 'asc' | 'desc' | undefined,
-    };
+    const { searchParams } = new URL(request.url);
+    const status = searchParams.get('status') as CartStatus | null;
+    const page = parseInt(searchParams.get('page') || '1', 10);
+    const limit = parseInt(searchParams.get('limit') || '10', 10);
+    const sortBy = searchParams.get('sortBy') || 'abandonedAt';
+    const sortOrder = (searchParams.get('sortOrder') || 'desc') as 'asc' | 'desc';
 
-    const result = await cartService.getCarts(params);
-    return NextResponse.json(successResponse(result.data, 'Carts retrieved successfully', result.pagination));
-  } catch (error: any) {
+    const cartService = getCartService();
+    const result = await cartService.getCarts({
+      status: status || undefined,
+      page,
+      limit,
+      sortBy,
+      sortOrder,
+    });
+
     return NextResponse.json(
-      errorResponse(error.message || 'Failed to retrieve carts', error.statusCode || 500),
-      { status: error.statusCode || 500 }
+      paginatedResponse(result.carts, result.pagination)
+    );
+  } catch (error) {
+    const apiError = handleApiError(error);
+    return NextResponse.json(
+      errorResponse(apiError.message, apiError.code),
+      { status: apiError.statusCode }
     );
   }
 }
@@ -29,36 +37,17 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    
-    const params: CreateCartParams = {
-      customerEmail: body.customerEmail,
-      customerName: body.customerName,
-      items: body.items,
-    };
+    const cartService = getCartService();
+    const cart = await cartService.createCart(body);
 
-    if (!params.customerEmail) {
-      return NextResponse.json(
-        errorResponse('Customer email is required', 400),
-        { status: 400 }
-      );
-    }
-
-    if (!params.items || !Array.isArray(params.items) || params.items.length === 0) {
-      return NextResponse.json(
-        errorResponse('Cart must have at least one item', 400),
-        { status: 400 }
-      );
-    }
-
-    const cart = await cartService.createCart(params);
+    return NextResponse.json(successResponse(cart, 'Cart created successfully'), {
+      status: 201,
+    });
+  } catch (error) {
+    const apiError = handleApiError(error);
     return NextResponse.json(
-      successResponse(cart, 'Cart created successfully'),
-      { status: 201 }
-    );
-  } catch (error: any) {
-    return NextResponse.json(
-      errorResponse(error.message || 'Failed to create cart', error.statusCode || 500),
-      { status: error.statusCode || 500 }
+      errorResponse(apiError.message, apiError.code),
+      { status: apiError.statusCode }
     );
   }
 }
