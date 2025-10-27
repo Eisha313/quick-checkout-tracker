@@ -1,208 +1,154 @@
-import { useState, useEffect, useCallback } from 'react';
-import { AbandonedCart, CartStatus, PaginatedResponse } from '@/types';
+'use client';
 
-interface UseCartsOptions {
-  status?: CartStatus;
-  page?: number;
-  limit?: number;
-  autoFetch?: boolean;
-}
+import { useState, useCallback } from 'react';
+import { useQuery, useMutation, invalidateQueries } from './useQueryClient';
+import type { AbandonedCart, CartStatus } from '@/types';
 
-interface UseCartsReturn {
-  carts: AbandonedCart[];
-  loading: boolean;
-  error: string | null;
+interface CartsResponse {
+  data: AbandonedCart[];
   pagination: {
+    total: number;
     page: number;
     limit: number;
-    total: number;
     totalPages: number;
   };
-  fetchCarts: () => Promise<void>;
-  refetch: () => Promise<void>;
-  setPage: (page: number) => void;
-  setStatus: (status: CartStatus | undefined) => void;
-  updateCartLocally: (id: string, updates: Partial<AbandonedCart>) => void;
-  removeCartLocally: (id: string) => void;
 }
 
-export function useCarts(options: UseCartsOptions = {}): UseCartsReturn {
-  const { autoFetch = true } = options;
-  
-  const [carts, setCarts] = useState<AbandonedCart[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<CartStatus | undefined>(options.status);
-  const [page, setPage] = useState(options.page || 1);
-  const [limit] = useState(options.limit || 10);
-  const [pagination, setPagination] = useState({
-    page: 1,
-    limit: 10,
-    total: 0,
-    totalPages: 0,
+interface UseCartsOptions {
+  page?: number;
+  limit?: number;
+  status?: CartStatus;
+  sortBy?: 'createdAt' | 'cartValue' | 'customerEmail';
+  sortOrder?: 'asc' | 'desc';
+}
+
+interface UpdateCartData {
+  status?: CartStatus;
+  notes?: string;
+}
+
+export function useCarts(options: UseCartsOptions = {}) {
+  const { page = 1, limit = 10, status, sortBy = 'createdAt', sortOrder = 'desc' } = options;
+
+  const buildQueryString = useCallback(() => {
+    const params = new URLSearchParams();
+    params.set('page', page.toString());
+    params.set('limit', limit.toString());
+    params.set('sortBy', sortBy);
+    params.set('sortOrder', sortOrder);
+    if (status) params.set('status', status);
+    return params.toString();
+  }, [page, limit, status, sortBy, sortOrder]);
+
+  const queryKey = ['carts', buildQueryString()];
+
+  const fetchCarts = useCallback(async (): Promise<CartsResponse> => {
+    const response = await fetch(`/api/carts?${buildQueryString()}`);
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || 'Failed to fetch carts');
+    }
+    return response.json();
+  }, [buildQueryString]);
+
+  const query = useQuery<CartsResponse>(queryKey, fetchCarts, {
+    staleTime: 30 * 1000, // 30 seconds
   });
 
-  const fetchCarts = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const params = new URLSearchParams();
-      params.append('page', page.toString());
-      params.append('limit', limit.toString());
-      if (status) {
-        params.append('status', status);
-      }
-
-      const response = await fetch(`/api/carts?${params.toString()}`);
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error?.message || 'Failed to fetch carts');
-      }
-
-      const result = data.data as PaginatedResponse<AbandonedCart>;
-      setCarts(result.data);
-      setPagination(result.pagination);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'An error occurred';
-      setError(message);
-    } finally {
-      setLoading(false);
-    }
-  }, [page, limit, status]);
-
-  const refetch = useCallback(async () => {
-    await fetchCarts();
-  }, [fetchCarts]);
-
-  const updateCartLocally = useCallback((id: string, updates: Partial<AbandonedCart>) => {
-    setCarts((prev) =>
-      prev.map((cart) =>
-        cart.id === id ? { ...cart, ...updates } : cart
-      )
-    );
-  }, []);
-
-  const removeCartLocally = useCallback((id: string) => {
-    setCarts((prev) => prev.filter((cart) => cart.id !== id));
-  }, []);
-
-  useEffect(() => {
-    if (autoFetch) {
-      fetchCarts();
-    }
-  }, [autoFetch, fetchCarts]);
-
   return {
-    carts,
-    loading,
-    error,
-    pagination,
-    fetchCarts,
-    refetch,
-    setPage,
-    setStatus,
-    updateCartLocally,
-    removeCartLocally,
+    carts: query.data?.data ?? [],
+    pagination: query.data?.pagination ?? { total: 0, page: 1, limit: 10, totalPages: 0 },
+    isLoading: query.isLoading,
+    isFetching: query.isFetching,
+    error: query.error,
+    refetch: query.refetch,
   };
 }
 
-export function useCart(id: string) {
-  const [cart, setCart] = useState<AbandonedCart | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchCart = useCallback(async () => {
-    if (!id) return;
-
-    setLoading(true);
-    setError(null);
-
-    try {
-      const response = await fetch(`/api/carts/${id}`);
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error?.message || 'Failed to fetch cart');
-      }
-
-      setCart(data.data);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'An error occurred';
-      setError(message);
-    } finally {
-      setLoading(false);
+export function useCart(id: string | null) {
+  const fetchCart = useCallback(async (): Promise<AbandonedCart> => {
+    if (!id) throw new Error('Cart ID is required');
+    const response = await fetch(`/api/carts/${id}`);
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || 'Failed to fetch cart');
     }
+    const result = await response.json();
+    return result.data;
   }, [id]);
 
-  const updateCart = useCallback(async (updates: Partial<AbandonedCart>) => {
-    if (!id) return null;
+  return useQuery<AbandonedCart>(['cart', id ?? 'null'], fetchCart, {
+    enabled: !!id,
+    staleTime: 60 * 1000, // 1 minute
+  });
+}
 
-    setLoading(true);
-    setError(null);
+export function useUpdateCart() {
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
 
-    try {
+  const mutation = useMutation<AbandonedCart, { id: string; data: UpdateCartData }>(
+    async ({ id, data }) => {
+      setUpdatingId(id);
       const response = await fetch(`/api/carts/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
+        body: JSON.stringify(data),
       });
-
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error?.message || 'Failed to update cart');
+        const error = await response.json();
+        throw new Error(error.message || 'Failed to update cart');
       }
-
-      setCart(data.data);
-      return data.data;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'An error occurred';
-      setError(message);
-      return null;
-    } finally {
-      setLoading(false);
+      const result = await response.json();
+      return result.data;
+    },
+    {
+      onSuccess: () => {
+        invalidateQueries('carts');
+      },
+      onSettled: () => {
+        setUpdatingId(null);
+      },
     }
-  }, [id]);
+  );
 
-  const deleteCart = useCallback(async () => {
-    if (!id) return false;
+  return {
+    updateCart: mutation.mutate,
+    updateCartAsync: mutation.mutateAsync,
+    isUpdating: mutation.isLoading,
+    updatingId,
+    error: mutation.error,
+  };
+}
 
-    setLoading(true);
-    setError(null);
+export function useDeleteCart() {
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
-    try {
+  const mutation = useMutation<void, string>(
+    async (id) => {
+      setDeletingId(id);
       const response = await fetch(`/api/carts/${id}`, {
         method: 'DELETE',
       });
-
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error?.message || 'Failed to delete cart');
+        const error = await response.json();
+        throw new Error(error.message || 'Failed to delete cart');
       }
-
-      setCart(null);
-      return true;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'An error occurred';
-      setError(message);
-      return false;
-    } finally {
-      setLoading(false);
+    },
+    {
+      onSuccess: () => {
+        invalidateQueries('carts');
+      },
+      onSettled: () => {
+        setDeletingId(null);
+      },
     }
-  }, [id]);
-
-  useEffect(() => {
-    fetchCart();
-  }, [fetchCart]);
+  );
 
   return {
-    cart,
-    loading,
-    error,
-    fetchCart,
-    updateCart,
-    deleteCart,
+    deleteCart: mutation.mutate,
+    deleteCartAsync: mutation.mutateAsync,
+    isDeleting: mutation.isLoading,
+    deletingId,
+    error: mutation.error,
   };
 }

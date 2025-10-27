@@ -1,88 +1,77 @@
-import { useState, useEffect, useCallback } from 'react';
-import { TimeRange, AnalyticsDashboard, AnalyticsSummary } from '@/services/analytics.service';
+'use client';
+
+import { useCallback } from 'react';
+import { useQuery } from './useQueryClient';
+import type { AnalyticsData, DateRange } from '@/types';
 
 interface UseAnalyticsOptions {
-  timeRange?: TimeRange;
-  view?: 'dashboard' | 'summary' | 'daily' | 'products' | 'revenue';
-  autoRefresh?: boolean;
-  refreshInterval?: number;
+  dateRange?: DateRange;
+  enabled?: boolean;
 }
 
-interface UseAnalyticsReturn<T> {
-  data: T | null;
-  isLoading: boolean;
-  error: string | null;
-  refetch: () => Promise<void>;
-  setTimeRange: (range: TimeRange) => void;
-}
+export function useAnalytics(options: UseAnalyticsOptions = {}) {
+  const { dateRange, enabled = true } = options;
 
-export function useAnalytics<T = AnalyticsDashboard>(
-  options: UseAnalyticsOptions = {}
-): UseAnalyticsReturn<T> {
-  const {
-    timeRange: initialTimeRange = '30d',
-    view = 'dashboard',
-    autoRefresh = false,
-    refreshInterval = 60000,
-  } = options;
+  const buildQueryString = useCallback(() => {
+    if (!dateRange) return '';
+    const params = new URLSearchParams();
+    params.set('startDate', dateRange.startDate.toISOString());
+    params.set('endDate', dateRange.endDate.toISOString());
+    return params.toString();
+  }, [dateRange]);
 
-  const [timeRange, setTimeRange] = useState<TimeRange>(initialTimeRange);
-  const [data, setData] = useState<T | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryString = buildQueryString();
+  const queryKey = ['analytics', queryString];
 
-  const fetchAnalytics = useCallback(async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-
-      const params = new URLSearchParams({
-        timeRange,
-        view,
-      });
-
-      const response = await fetch(`/api/analytics?${params.toString()}`);
-      const result = await response.json();
-
-      if (!result.success) {
-        throw new Error(result.error || 'Failed to fetch analytics');
-      }
-
-      setData(result.data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setIsLoading(false);
+  const fetchAnalytics = useCallback(async (): Promise<AnalyticsData> => {
+    const url = queryString ? `/api/analytics?${queryString}` : '/api/analytics';
+    const response = await fetch(url);
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || 'Failed to fetch analytics');
     }
-  }, [timeRange, view]);
+    const result = await response.json();
+    return result.data;
+  }, [queryString]);
 
-  useEffect(() => {
-    fetchAnalytics();
-  }, [fetchAnalytics]);
-
-  useEffect(() => {
-    if (!autoRefresh) return;
-
-    const interval = setInterval(fetchAnalytics, refreshInterval);
-    return () => clearInterval(interval);
-  }, [autoRefresh, refreshInterval, fetchAnalytics]);
+  const query = useQuery<AnalyticsData>(queryKey, fetchAnalytics, {
+    enabled,
+    staleTime: 60 * 1000, // 1 minute
+    refetchInterval: 5 * 60 * 1000, // 5 minutes auto-refresh
+  });
 
   return {
-    data,
-    isLoading,
-    error,
-    refetch: fetchAnalytics,
-    setTimeRange,
+    analytics: query.data,
+    isLoading: query.isLoading,
+    isFetching: query.isFetching,
+    error: query.error,
+    refetch: query.refetch,
   };
 }
 
-export function useAnalyticsSummary(timeRange: TimeRange = '30d') {
-  return useAnalytics<AnalyticsSummary>({ timeRange, view: 'summary' });
-}
+export function useRecoveryTrends(days: number = 30) {
+  const fetchTrends = useCallback(async () => {
+    const response = await fetch(`/api/analytics/trends?days=${days}`);
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || 'Failed to fetch trends');
+    }
+    const result = await response.json();
+    return result.data;
+  }, [days]);
 
-export function useRecoveryMetrics(timeRange: TimeRange = '30d') {
-  return useAnalytics<{ recovered: number; potential: number; expired: number }>({
-    timeRange,
-    view: 'revenue',
-  });
+  const query = useQuery<{ date: string; recovered: number; abandoned: number }[]>(
+    ['analytics', 'trends', days.toString()],
+    fetchTrends,
+    {
+      staleTime: 5 * 60 * 1000, // 5 minutes
+    }
+  );
+
+  return {
+    trends: query.data ?? [],
+    isLoading: query.isLoading,
+    error: query.error,
+    refetch: query.refetch,
+  };
 }
